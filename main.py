@@ -10,7 +10,7 @@ import os
 app = Flask(__name__)
 
 # URL для получения товаров из 1С
-url = os.getenv('OneС_URL')
+url = os.getenv('ONE_URL')
 
 # Данные для доступа к Shopify API
 shopify_store_url = os.getenv('SHOPIFY_STORE_URL')
