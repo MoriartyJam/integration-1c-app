@@ -102,9 +102,8 @@ def fetch_products():
         print(f"Ошибка при запросе к 1С: {e}")
         return None
 
-# Получаем все товары из Shopify (с пагинацией)
 def fetch_all_shopify_products():
-    shopify_url = f"{shopify_store_url}/admin/api/2024-01/products.json?fields=id,variants,status&limit=250"
+    shopify_url = f"{shopify_store_url}/admin/api/2024-01/products.json?fields=id,handle,variants,status&limit=250"
     headers = {
         "Content-Type": "application/json",
         "X-Shopify-Access-Token": access_token
@@ -117,14 +116,11 @@ def fetch_all_shopify_products():
         if page_info:
             params["page_info"] = page_info
 
-        # Задержка перед запросом к Shopify, чтобы избежать 429
         time.sleep(0.6)
-
         response = requests.get(shopify_url, headers=headers, params=params)
         if response.status_code == 200:
             products = response.json().get('products', [])
             all_products.extend(products)
-            # Проверяем заголовок "Link" на наличие следующей страницы
             link_header = response.headers.get("Link")
             if link_header and 'rel="next"' in link_header:
                 page_info = link_header.split('page_info=')[1].split('>')[0]
@@ -242,39 +238,48 @@ def transform_to_shopify_format(product):
     }
     return shopify_product
 
-# Отправляем (или обновляем) товар в Shopify
 def send_to_shopify(shopify_product, existing_products):
     sku = shopify_product['product']['variants'][0]['sku']
     new_price = shopify_product['product']['variants'][0]['price']
     new_quantity = shopify_product['product']['variants'][0]['inventory_quantity']
+    handle = shopify_product['product']['handle']
 
-    # Ищем товар с таким SKU в уже существующих
-    existing_product = next((p for p in existing_products if any(v['sku'] == sku for v in p['variants'])), None)
+    all_skus = {v['sku'] for p in existing_products for v in p.get('variants', [])}
+    all_handles = {p.get('handle') for p in existing_products}
 
-    if existing_product:
-        print(f"Товар со SKU {sku} уже существует в Shopify. Обновляем...")
-        variant = next(v for v in existing_product['variants'] if v['sku'] == sku)
-        variant_id = variant['id']
-        inventory_item_id = variant['inventory_item_id']  # Теперь передаем inventory_item_id
+    # 🔍 Логируем для отладки
+    print(f"🔍 Проверка SKU: {sku}")
+    print(f"🔍 Проверка Handle: {handle}")
 
-        # Обновляем цену и количество
-        print(f"Старые данные: цена = {variant['price']}")
-        print(f"Новые данные: цена = {new_price}, количество = {new_quantity}")
-        update_shopify_variant(variant_id, inventory_item_id, new_price, new_quantity)
+    # 🛑 Проверка: если такой SKU уже есть — обновляем
+    if sku in all_skus:
+        existing_product = next((p for p in existing_products if any(v['sku'] == sku for v in p['variants'])), None)
+        if existing_product:
+            print(f"🔁 Товар со SKU {sku} уже существует в Shopify. Обновляем...")
+            variant = next(v for v in existing_product['variants'] if v['sku'] == sku)
+            update_shopify_variant(variant['id'], variant['inventory_item_id'], new_price, new_quantity)
+        return
+
+    # 🛑 Проверка: если такой handle уже есть — не создаём
+    if handle in all_handles:
+        print(f"⚠️ Товар с таким handle уже есть в Shopify: {handle}. Пропускаем создание.")
+        return
+
+    # ✅ Создаём товар
+    print(f"🆕 Создаём товар со SKU {sku} и handle '{handle}'")
+    time.sleep(0.6)
+    shopify_url = f"{shopify_store_url}/admin/api/2024-01/products.json"
+    headers = {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": access_token
+    }
+    response = requests.post(shopify_url, headers=headers, json=shopify_product)
+    if response.status_code == 201:
+        print("✅ Товар успешно создан.")
+        # Добавим в existing_products, чтобы учесть в будущем цикле
+        existing_products.append(response.json()['product'])
     else:
-        print(f"Товар со SKU {sku} не найден в Shopify. Создаем новый продукт.")
-        time.sleep(0.6)
-
-        shopify_url = f"{shopify_store_url}/admin/api/2024-01/products.json"
-        headers = {
-            "Content-Type": "application/json",
-            "X-Shopify-Access-Token": access_token
-        }
-        response = requests.post(shopify_url, headers=headers, json=shopify_product)
-        if response.status_code == 201:
-            print("Товар успешно создан.")
-        else:
-            print(f"Ошибка при создании товара: {response.status_code}, {response.json()}")
+        print(f"❌ Ошибка при создании товара: {response.status_code}, {response.json()}")
 
 # 🛠 Добавляем контекст приложения для APScheduler
 def scheduled_sync():
