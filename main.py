@@ -110,7 +110,11 @@ def fetch_all_shopify_products():
     }
 
     all_products = []
-    params = {"limit": 250}
+    params = {
+        "limit": 250,
+        "fields": "id,handle,variants,status" 
+    }
+
     next_url = base_url
 
     while next_url:
@@ -121,14 +125,15 @@ def fetch_all_shopify_products():
             data = response.json().get('products', [])
             all_products.extend(data)
 
-            # Обработка пагинации через заголовок Link
+            # Пагинация через Link заголовок
             link_header = response.headers.get("Link")
             if link_header and 'rel="next"' in link_header:
                 parts = link_header.split(",")
                 next_link = next((p for p in parts if 'rel="next"' in p), None)
                 if next_link:
                     next_url = next_link[next_link.find("<") + 1:next_link.find(">")]
-                    params = {}  # Обнуляем params, т.к. они уже есть в ссылке
+                    # Параметры уже встроены в ссылку — больше их не передаём
+                    params = None
                 else:
                     break
             else:
@@ -139,6 +144,7 @@ def fetch_all_shopify_products():
 
     print(f"📦 Всего товаров получено из Shopify: {len(all_products)}")
     return all_products
+
 
 
 def send_request_with_retry(url, method='GET', headers=None, json_data=None, max_retries=5):
