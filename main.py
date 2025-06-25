@@ -103,33 +103,41 @@ def fetch_products():
         return None
 
 def fetch_all_shopify_products():
-    shopify_url = f"{shopify_store_url}/admin/api/2024-01/products.json?fields=id,handle,variants,status&limit=250"
+    base_url = f"{shopify_store_url}/admin/api/2024-01/products.json"
     headers = {
         "Content-Type": "application/json",
         "X-Shopify-Access-Token": access_token
     }
+
     all_products = []
-    page_info = None
+    params = {"limit": 250}
+    next_url = base_url
 
-    while True:
-        params = {"limit": 250}
-        if page_info:
-            params["page_info"] = page_info
+    while next_url:
+        time.sleep(0.6)  # Shopify API rate limit
+        response = requests.get(next_url, headers=headers, params=params)
 
-        time.sleep(0.6)
-        response = requests.get(shopify_url, headers=headers, params=params)
         if response.status_code == 200:
-            products = response.json().get('products', [])
-            all_products.extend(products)
+            data = response.json().get('products', [])
+            all_products.extend(data)
+
+            # Обработка пагинации через заголовок Link
             link_header = response.headers.get("Link")
             if link_header and 'rel="next"' in link_header:
-                page_info = link_header.split('page_info=')[1].split('>')[0]
+                parts = link_header.split(",")
+                next_link = next((p for p in parts if 'rel="next"' in p), None)
+                if next_link:
+                    next_url = next_link[next_link.find("<") + 1:next_link.find(">")]
+                    params = {}  # Обнуляем params, т.к. они уже есть в ссылке
+                else:
+                    break
             else:
                 break
         else:
-            print(f"Ошибка при получении товаров из Shopify. Код: {response.status_code}")
+            print(f"❌ Ошибка при получении товаров из Shopify: {response.status_code}")
             break
 
+    print(f"📦 Всего товаров получено из Shopify: {len(all_products)}")
     return all_products
 
 
