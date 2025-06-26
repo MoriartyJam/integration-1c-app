@@ -292,6 +292,8 @@ def send_to_shopify(shopify_product, existing_products):
         new_product = response.json()['product']
         print(f"✅ Товар успешно создан с handle: {new_product['handle']}")
         existing_products.append(new_product)  # Сохраняем реальный handle (вдруг Shopify изменил его)
+        all_skus.add(new_product['variants'][0]['sku'])
+        all_handles.add(new_product['handle'])
 
     else:
         print(f"❌ Ошибка при создании товара: {response.status_code}, {response.json()}")
