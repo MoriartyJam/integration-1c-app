@@ -289,9 +289,10 @@ def send_to_shopify(shopify_product, existing_products):
     }
     response = requests.post(shopify_url, headers=headers, json=shopify_product)
     if response.status_code == 201:
-        print("✅ Товар успешно создан.")
-        # Добавим в existing_products, чтобы учесть в будущем цикле
-        existing_products.append(response.json()['product'])
+        new_product = response.json()['product']
+        print(f"✅ Товар успешно создан с handle: {new_product['handle']}")
+        existing_products.append(new_product)  # Сохраняем реальный handle (вдруг Shopify изменил его)
+
     else:
         print(f"❌ Ошибка при создании товара: {response.status_code}, {response.json()}")
 
