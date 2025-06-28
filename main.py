@@ -252,14 +252,12 @@ def transform_to_shopify_format(product):
     }
     return shopify_product
 
-def send_to_shopify(shopify_product, existing_products):
+def send_to_shopify(shopify_product, existing_products, all_skus, all_handles):
     sku = shopify_product['product']['variants'][0]['sku']
     new_price = shopify_product['product']['variants'][0]['price']
     new_quantity = shopify_product['product']['variants'][0]['inventory_quantity']
     handle = shopify_product['product']['handle']
 
-    all_skus = {v['sku'] for p in existing_products for v in p.get('variants', [])}
-    all_handles = {p.get('handle') for p in existing_products}
 
     # 🔍 Логируем для отладки
     print(f"🔍 Проверка SKU: {sku}")
@@ -312,6 +310,10 @@ def sync_products():
     if not products:
         return jsonify({'status': 'No products found or an error occurred.'})
 
+    # 🔧 Создаём множества один раз
+    all_skus = {v['sku'] for p in existing_products for v in p.get('variants', [])}
+    all_handles = {p.get('handle') for p in existing_products}
+
     print(f"Найдено товаров в 1С: {len(products)}")
     for product in products:
         if not isinstance(product, dict):
@@ -320,7 +322,7 @@ def sync_products():
 
         shopify_product = transform_to_shopify_format(product)
         if shopify_product:
-            send_to_shopify(shopify_product, existing_products)
+            send_to_shopify(shopify_product, existing_products, all_skus, all_handles) 
         else:
             print(f"Пропущен товар без цены 'ТОВ': {product.get('id', 'Неизвестный ID')}")
 
