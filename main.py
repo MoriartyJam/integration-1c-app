@@ -343,4 +343,4 @@ scheduler.add_job(func=scheduled_sync, trigger='interval', minutes=180)  # Ис�
 scheduler.start()
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=80, debug=True)
+    app.run(host='0.0.0.0', port=80, debug=False)
