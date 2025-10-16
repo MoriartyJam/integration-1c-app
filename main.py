@@ -339,7 +339,7 @@ executors = {
 }
 
 scheduler = BackgroundScheduler(executors=executors)
-scheduler.add_job(func=scheduled_sync, trigger='interval', minutes=5)  # Используем `scheduled_sync`
+scheduler.add_job(func=scheduled_sync, trigger='interval', minutes=180)  # Используем `scheduled_sync`
 scheduler.start()
 
 if __name__ == '__main__':
