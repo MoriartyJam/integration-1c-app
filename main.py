@@ -231,6 +231,9 @@ def send_to_shopify(shopify_product, existing_products, all_skus, all_handles):
     handle = shopify_product['product']['handle']
 
     print(f"🔍 SKU: {sku} | Handle: {handle}")
+    print("🧪 DEBUG sku repr:", repr(sku), "type:", type(sku))
+    print("🧪 DEBUG all_skus size:", len(all_skus))
+    print("🧪 DEBUG sku in all_skus:", sku in all_skus)
 
     # SKU вже існує — оновлюємо
     if sku in all_skus:
