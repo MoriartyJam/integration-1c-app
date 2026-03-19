@@ -3,6 +3,7 @@ import requests
 import json
 import httpx
 import time
+import fcntl
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.triggers.interval import IntervalTrigger
@@ -22,6 +23,9 @@ access_token = os.getenv('SHOPIFY_ACCESS_TOKEN')
 # Базовий інтервал автосинхронізації (хв)
 SCHEDULE_MINUTES = 180
 JOB_ID = "sync_job"
+LOCK_FILE_PATH = "/tmp/integration_1c_shopify_sync.lock"
+SHOPIFY_FULL_FETCH_RESTARTS = 3
+SHOPIFY_PAGE_LIMIT = 125
 
 # ================== УТИЛІТИ ==================
 def extract_valid_json(content):
@@ -71,6 +75,47 @@ def clean_quantity(quantity):
         print(f"❌ clean_quantity(): {e} | Вхід: {quantity}")
         return 0
 
+def normalize_sku(value):
+    """Уніфікуємо SKU для стабільних порівнянь."""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+def normalize_handle(value):
+    """Уніфікуємо handle для стабільних порівнянь."""
+    if value is None:
+        return ""
+    return str(value).strip().lower()
+
+def acquire_sync_lock():
+    """Крос-процесний lock: запобігає одночасним запускам синку."""
+    lock_file = open(LOCK_FILE_PATH, "w")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_file.write(str(os.getpid()))
+        lock_file.flush()
+        return lock_file
+    except OSError:
+        lock_file.close()
+        return None
+
+def release_sync_lock(lock_file):
+    if not lock_file:
+        return
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_file.close()
+
+def is_success_response(result):
+    """Визначаємо, чи sync завершився успішно (2xx)."""
+    if result is None:
+        return True
+    if isinstance(result, tuple) and len(result) >= 2 and isinstance(result[1], int):
+        return 200 <= result[1] < 300
+    status_code = getattr(result, "status_code", 200)
+    return 200 <= status_code < 300
+
 # ================== 1C ==================
 def fetch_products():
     try:
@@ -102,18 +147,32 @@ def fetch_all_shopify_products():
         "Content-Type": "application/json",
         "X-Shopify-Access-Token": access_token
     }
-    all_products = []
-    params = {
-        "limit": 250,
-        "fields": "id,handle,variants,status"
-    }
-    next_url = base_url
+    for attempt in range(1, SHOPIFY_FULL_FETCH_RESTARTS + 1):
+        all_products = []
+        params = {
+            "limit": SHOPIFY_PAGE_LIMIT,
+            "fields": "id,handle,variants,status"
+        }
+        next_url = base_url
+        page_num = 0
+        failed = False
 
-    while next_url:
-        time.sleep(0.6)  # rate limit
-        response = requests.get(next_url, headers=headers, params=params)
+        print(f"📥 Спроба {attempt}/{SHOPIFY_FULL_FETCH_RESTARTS} повного збору товарів Shopify...")
+        while next_url:
+            page_num += 1
+            time.sleep(0.6)  # rate limit
+            try:
+                response = requests.get(next_url, headers=headers, params=params, timeout=30)
+            except requests.RequestException as e:
+                print(f"❌ Помилка мережі на сторінці {page_num}: {e}. Перезапуск збору...")
+                failed = True
+                break
 
-        if response.status_code == 200:
+            if response.status_code != 200:
+                print(f"❌ Помилка отримання Shopify сторінки {page_num}: {response.status_code}. Перезапуск збору...")
+                failed = True
+                break
+
             data = response.json().get('products', [])
             all_products.extend(data)
             link_header = response.headers.get("Link")
@@ -127,12 +186,18 @@ def fetch_all_shopify_products():
                     break
             else:
                 break
-        else:
-            print(f"❌ Помилка отримання товарів з Shopify: {response.status_code}")
-            break
 
-    print(f"📦 Отримано товарів з Shopify: {len(all_products)}")
-    return all_products
+        if not failed:
+            print(f"📦 Отримано товарів з Shopify: {len(all_products)}")
+            return all_products
+
+        if attempt < SHOPIFY_FULL_FETCH_RESTARTS:
+            backoff = attempt * 2
+            print(f"⏳ Повторна спроба повного збору через {backoff} с...")
+            time.sleep(backoff)
+
+    print("❌ Не вдалося повністю зібрати товари Shopify. Синхронізацію зупинено.")
+    return None
 
 def send_request_with_retry(url, method='GET', headers=None, json_data=None, max_retries=5):
     retries = 0
@@ -225,10 +290,10 @@ def transform_to_shopify_format(product):
     return shopify_product
 
 def send_to_shopify(shopify_product, existing_products, all_skus, all_handles):
-    sku = shopify_product['product']['variants'][0]['sku']
+    sku = normalize_sku(shopify_product['product']['variants'][0]['sku'])
     new_price = shopify_product['product']['variants'][0]['price']
     new_quantity = shopify_product['product']['variants'][0]['inventory_quantity']
-    handle = shopify_product['product']['handle']
+    handle = normalize_handle(shopify_product['product']['handle'])
 
     print(f"🔍 SKU: {sku} | Handle: {handle}")
     print("🧪 DEBUG sku repr:", repr(sku), "type:", type(sku))
@@ -237,10 +302,13 @@ def send_to_shopify(shopify_product, existing_products, all_skus, all_handles):
 
     # SKU вже існує — оновлюємо
     if sku in all_skus:
-        existing_product = next((p for p in existing_products if any(v['sku'] == sku for v in p['variants'])), None)
+        existing_product = next((
+            p for p in existing_products
+            if any(normalize_sku(v.get('sku')) == sku for v in p.get('variants', []))
+        ), None)
         if existing_product:
             print(f"🔁 SKU {sku} існує. Оновлюємо варіант...")
-            variant = next(v for v in existing_product['variants'] if v['sku'] == sku)
+            variant = next(v for v in existing_product['variants'] if normalize_sku(v.get('sku')) == sku)
             update_shopify_variant(variant['id'], variant['inventory_item_id'], new_price, new_quantity)
         return
 
@@ -259,8 +327,22 @@ def send_to_shopify(shopify_product, existing_products, all_skus, all_handles):
         new_product = response.json()['product']
         print(f"✅ Створено: handle={new_product['handle']}")
         existing_products.append(new_product)
-        all_skus.add(new_product['variants'][0]['sku'])
-        all_handles.add(new_product['handle'])
+        all_skus.add(normalize_sku(new_product['variants'][0].get('sku')))
+        all_handles.add(normalize_handle(new_product.get('handle')))
+    elif response.status_code == 422:
+        # Можливий конфлікт/дубль (наприклад, товар уже створив паралельний процес)
+        print(f"⚠️ 422 під час створення SKU {sku}. Перевіряємо Shopify повторно...")
+        refreshed_products = fetch_all_shopify_products()
+        existing_product = next((
+            p for p in refreshed_products
+            if any(normalize_sku(v.get('sku')) == sku for v in p.get('variants', []))
+        ), None)
+        if existing_product:
+            variant = next(v for v in existing_product['variants'] if normalize_sku(v.get('sku')) == sku)
+            print(f"🔁 Після 422 знайдено SKU {sku}. Оновлюємо замість створення.")
+            update_shopify_variant(variant['id'], variant['inventory_item_id'], new_price, new_quantity)
+        else:
+            print(f"❌ 422 без знайденого SKU {sku}: {response.json()}")
     else:
         print(f"❌ Помилка створення: {response.status_code}, {response.json()}")
 
@@ -271,10 +353,20 @@ def scheduled_sync():
     """Фонова синхронізація + фіксація часу запуску."""
     global last_run_time
     with app.app_context():
+        lock_file = acquire_sync_lock()
+        if not lock_file:
+            print("⏭️ Синхронізація вже виконується в іншому процесі. Пропуск фонового запуску.")
+            return
         print("🔄 Запуск фонової синхронізації...")
-        last_run_time = datetime.now(timezone.utc)  # 👈 без deprecated utcnow()
-        _ = sync_products()
-        print("✅ Фонову синхронізацію завершено.")
+        try:
+            last_run_time = datetime.now(timezone.utc)  # 👈 без deprecated utcnow()
+            result = sync_products()
+            if is_success_response(result):
+                print("✅ Фонову синхронізацію завершено.")
+            else:
+                print("⚠️ Фонову синхронізацію завершено з помилкою. Наступний запуск буде за розкладом.")
+        finally:
+            release_sync_lock(lock_file)
 
 @app.route('/sync_products')
 def sync_products():
@@ -283,9 +375,20 @@ def sync_products():
 
     if not products:
         return jsonify({'status': 'No products found or an error occurred.'})
+    if existing_products is None:
+        return jsonify({'status': 'Shopify catalog fetch failed. Sync aborted.'}), 503
 
-    all_skus = {v['sku'] for p in existing_products for v in p.get('variants', [])}
-    all_handles = {p.get('handle') for p in existing_products}
+    all_skus = {
+        normalize_sku(v.get('sku'))
+        for p in existing_products
+        for v in p.get('variants', [])
+        if normalize_sku(v.get('sku'))
+    }
+    all_handles = {
+        normalize_handle(p.get('handle'))
+        for p in existing_products
+        if normalize_handle(p.get('handle'))
+    }
 
     print(f"Знайдено товарів в 1С: {len(products)}")
     for product in products:
@@ -514,7 +617,27 @@ def status():
 @app.route("/run_sync", methods=["POST"])
 def run_sync():
     """Ручний запуск синхронізації + зсув наступного автозапуску на повний інтервал."""
-    scheduled_sync()
+    lock_file = acquire_sync_lock()
+    if not lock_file:
+        return jsonify({"ok": False, "message": "Синхронізація вже виконується. Спробуйте через хвилину."}), 409
+
+    try:
+        global last_run_time
+        print("🔄 Ручний запуск синхронізації...")
+        last_run_time = datetime.now(timezone.utc)
+        result = sync_products()
+        if is_success_response(result):
+            print("✅ Ручну синхронізацію завершено.")
+            ok = True
+            msg = "Синхронізацію виконано."
+            code = 200
+        else:
+            print("⚠️ Ручна синхронізація завершилась з помилкою.")
+            ok = False
+            msg = "Синхронізація завершилась з помилкою. Наступний автозапуск буде за розкладом."
+            code = 503
+    finally:
+        release_sync_lock(lock_file)
 
     # 👇 Надійний спосіб: пересоздаємо тригер зі start_date = now + interval
     next_start = datetime.now(timezone.utc) + timedelta(minutes=SCHEDULE_MINUTES)
@@ -527,18 +650,18 @@ def run_sync():
     job = scheduler.get_job(JOB_ID)
     if job:
         job.reschedule(new_trigger)
-        msg = f"Синхронізацію виконано. Наступний автозапуск через {SCHEDULE_MINUTES} хв."
+        msg = f"{msg} Наступний автозапуск через {SCHEDULE_MINUTES} хв."
     else:
         scheduler.add_job(func=scheduled_sync, trigger=new_trigger, id=JOB_ID, replace_existing=True)
-        msg = "Синхронізацію виконано. Задачу планувальника створено заново."
-    return jsonify({"ok": True, "message": msg})
+        msg = f"{msg} Задачу планувальника створено заново."
+    return jsonify({"ok": ok, "message": msg}), code
 
 # ================== APSCHEDULER ==================
 executors = {'default': ThreadPoolExecutor(20)}
 scheduler = BackgroundScheduler(
     executors=executors,
     timezone=timezone.utc,
-    job_defaults={"coalesce": False, "misfire_grace_time": 300},
+    job_defaults={"coalesce": True, "misfire_grace_time": 300, "max_instances": 1},
 )
 
 initial_trigger = IntervalTrigger(
