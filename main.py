@@ -28,22 +28,68 @@ SHOPIFY_FULL_FETCH_RESTARTS = 3
 SHOPIFY_PAGE_LIMIT = 125
 
 # ================== УТИЛІТИ ==================
-def extract_valid_json(content):
-    """Спроба витягнути зламаний JSON послідовно."""
-    decoder = json.JSONDecoder()
-    idx = 0
-    valid_data = []
-    while idx < len(content):
-        try:
-            obj, idx = decoder.raw_decode(content, idx)
-            valid_data.append(obj)
-        except json.JSONDecodeError:
-            idx += 1
-    return valid_data
-
 def clean_json_content(content):
     # Підчищаємо зайві слеші
     return content.replace('\\",', '",')
+
+def repair_unescaped_json_quotes(content):
+    """Екранує лапки всередині JSON-рядків, які некоректно віддала 1С."""
+    repaired = []
+    in_string = False
+    escaped = False
+
+    for index, char in enumerate(content):
+        if escaped:
+            repaired.append(char)
+            escaped = False
+            continue
+
+        if char == "\\" and in_string:
+            repaired.append(char)
+            escaped = True
+            continue
+
+        if char != '"':
+            repaired.append(char)
+            continue
+
+        if not in_string:
+            in_string = True
+            repaired.append(char)
+            continue
+
+        next_non_space = ""
+        for next_char in content[index + 1:]:
+            if not next_char.isspace():
+                next_non_space = next_char
+                break
+
+        if next_non_space in {",", "}", "]", ":"} or not next_non_space:
+            in_string = False
+            repaired.append(char)
+        else:
+            repaired.append('\\"')
+
+    return "".join(repaired)
+
+def parse_products_content(content):
+    """Парсить повний каталог 1С, виправляючи відомий дефект лапок."""
+    cleaned_content = clean_json_content(content)
+    try:
+        products = json.loads(cleaned_content)
+    except json.JSONDecodeError as original_error:
+        repaired_content = repair_unescaped_json_quotes(cleaned_content)
+        try:
+            products = json.loads(repaired_content)
+            print(f"⚠️ JSON 1С містив неекрановані лапки та був виправлений: {original_error}")
+        except json.JSONDecodeError as repaired_error:
+            print(f"JSONDecodeError після спроби виправлення: {repaired_error}")
+            return None
+
+    if not isinstance(products, list):
+        print(f"Некоректний формат каталогу 1С: очікувався список, отримано {type(products)}")
+        return None
+    return products
 
 def clean_price(amount):
     try:
@@ -126,13 +172,7 @@ def fetch_products():
 
             if response.status_code == 200:
                 content = response.content.decode('utf-8-sig').strip()
-                content = clean_json_content(content)
-                try:
-                    products = json.loads(content)
-                    return products
-                except json.JSONDecodeError as e:
-                    print(f"JSONDecodeError: {e}")
-                    return extract_valid_json(content)
+                return parse_products_content(content)
             else:
                 print(f"Не вдалося отримати товари з 1С. Код: {response.status_code}")
                 return None

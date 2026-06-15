@@ -39,6 +39,32 @@ class DummyResponse:
         return self._payload
 
 
+def test_parse_products_content_repairs_unescaped_quotes_in_1c_article():
+    content = (
+        '[{"id":"000001288","article":"Основа "Азійський лимона"",'
+        '"name":"LEMO Основа Стік","quantity":"10",'
+        '"price":[{"type_price":"ТОВ","amount":"332,5"}]}]'
+    )
+
+    products = main.parse_products_content(content)
+
+    assert products == [
+        {
+            "id": "000001288",
+            "article": 'Основа "Азійський лимона"',
+            "name": "LEMO Основа Стік",
+            "quantity": "10",
+            "price": [{"type_price": "ТОВ", "amount": "332,5"}],
+        }
+    ]
+    shopify_product = main.transform_to_shopify_format(products[0])
+    assert shopify_product["product"]["variants"][0]["inventory_quantity"] == 10
+
+
+def test_parse_products_content_rejects_unrecoverable_partial_catalog():
+    assert main.parse_products_content('[{"id":"000001288"') is None
+
+
 def test_run_sync_returns_409_when_lock_is_busy(monkeypatch):
     monkeypatch.setattr(main, "acquire_sync_lock", lambda: None)
 
